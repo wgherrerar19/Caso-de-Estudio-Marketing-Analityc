@@ -1,16 +1,21 @@
 # -*- coding: utf-8 -*-
 """
 ChatBot Caso de Estudio (Seguros) - Streamlit
-Incluye:
-- Parser robusto de fechas (parse_effective_to_date)
-- Fix "truth value ambiguous" (coalesce_pandas)
-- Fix "too many values to unpack" (iterrows en coberturas)
-- FAQ dinámico con cifras
-- Filtros en sidebar que SOLO afectan 3 gráficas interactivas
+
+✔ Carga Excel desde URL RAW de GitHub o uploader
+✔ Selección automática de engine: openpyxl / pandas-calamine / xlrd
+✔ Limpieza y parseo robusto de fechas
+✔ FAQ dinámico con cifras (texto usa la base completa)
+✔ Filtros en sidebar que SOLO afectan 3 gráficas interactivas
+✔ Gráfica #3 como torta (aceptación por tipo de oferta)
+✔ Log de conversación en CSV (no toca el Excel)
 """
 
-import os
 from datetime import datetime
+from pathlib import Path
+import importlib.util
+import io
+import requests
 
 import numpy as np
 import pandas as pd
@@ -18,42 +23,77 @@ import streamlit as st
 import matplotlib.pyplot as plt
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.neighbors import NearestNeighbors
-import io, requests
 
+# --------------------------------------------------------------------
+# Configuración de página
+# --------------------------------------------------------------------
+st.set_page_config(
+    page_title="ChatBot Caso de Estudio (Seguros)",
+    page_icon="🚗",
+    layout="wide",
+)
 
-# ------------------------------
-# Configuración / Carga de archivo (vía RAW GitHub o uploader)
-# ------------------------------
+# --------------------------------------------------------------------
+# Utils: motores de Excel y carga desde URL
+# --------------------------------------------------------------------
+RAW_URL = "https://raw.githubusercontent.com/wgherrerar19/Caso-de-Estudio-Marketing-Analityc/main/casodeestudio.xlsx"
 
-# URL RAW del archivo en GitHub (no la página HTML)
-EXCEL_URL = "https://raw.githubusercontent.com/wgherrerar19/Caso-de-Estudio-Marketing-Analityc/main/casodeestudio.xlsx"
+def _has_module(mod: str) -> bool:
+    return importlib.util.find_spec(mod) is not None
+
+def pick_excel_engine(ext: str = ".xlsx") -> str | None:
+    """Devuelve el motor disponible para leer Excel."""
+    ext = (ext or "").lower()
+    # Prioridad para .xlsx
+    if ext.endswith(".xlsx") and _has_module("openpyxl"):
+        return "openpyxl"
+    # Alternativa ligera y rápida (xlsx/xls)
+    if _has_module("pandas_calamine"):
+        return "calamine"
+    # Antiguo .xls
+    if ext.endswith(".xls") and _has_module("xlrd"):
+        return "xlrd"
+    return None
 
 @st.cache_data(show_spinner=False)
-def load_excel_from_url(url: str) -> pd.DataFrame:
+def load_excel_from_url(url: str, ext: str = ".xlsx") -> pd.DataFrame:
+    eng = pick_excel_engine(ext)
+    if not eng:
+        raise RuntimeError(
+            "No hay motor de Excel instalado. Añade 'openpyxl' (xlsx) "
+            "o 'pandas-calamine' a requirements.txt."
+        )
     r = requests.get(url, timeout=30)
     r.raise_for_status()
-    return pd.read_excel(io.BytesIO(r.content))  # requiere openpyxl en requirements
+    return pd.read_excel(io.BytesIO(r.content), engine=eng)
 
-df_raw = None
+# --------------------------------------------------------------------
+# Carga de datos (URL RAW → uploader)
+# --------------------------------------------------------------------
+df_raw, origen = None, ""
 
-# 1) Intentar por URL RAW
 try:
-    df_raw = load_excel_from_url(EXCEL_URL)
+    df_raw = load_excel_from_url(RAW_URL, ".xlsx")
     origen = "URL RAW de GitHub"
+    st.caption(f"Motor Excel usado: **{pick_excel_engine('.xlsx')}**")
 except Exception as e:
     st.warning(f"No se pudo leer desde la URL RAW: {e}")
 
-# 2) Fallback: uploader manual si falla la URL
 if df_raw is None:
-    up = st.file_uploader("📥 Sube 'casodeestudio.xlsx'", type=["xlsx", "xls"])
+    up = st.file_uploader("📥 Sube 'casodeestudio.xlsx' (*.xlsx, *.xls)", type=["xlsx", "xls"])
     if up is not None:
         try:
-            df_raw = pd.read_excel(up)
-            origen = "archivo subido por el usuario"
+            ext = Path(up.name).suffix.lower()
+            eng = pick_excel_engine(ext)
+            if not eng:
+                st.error("Instala 'openpyxl' (xlsx) o 'pandas-calamine' (xlsx/xls) o 'xlrd' (xls).")
+            else:
+                df_raw = pd.read_excel(up, engine=eng)
+                origen = "archivo subido por el usuario"
+                st.caption(f"Motor Excel usado: **{eng}**")
         except Exception as e:
             st.error(f"No pude leer el archivo subido: {e}")
 
-# 3) Validación final
 if df_raw is not None:
     st.success(f"✅ Base cargada correctamente desde {origen}")
     st.dataframe(df_raw.astype(str), use_container_width=True)
@@ -61,9 +101,9 @@ else:
     st.error("⚠️ No se pudo cargar 'casodeestudio.xlsx'. Verifica la URL RAW o sube el archivo.")
     st.stop()
 
-# ------------------------------
+# --------------------------------------------------------------------
 # Helpers de formato y parsing
-# ------------------------------
+# --------------------------------------------------------------------
 def money(x, currency="$", decimals=0):
     try:
         return f"{currency}{x:,.{decimals}f}"
@@ -96,12 +136,10 @@ def parse_effective_to_date(series: pd.Series) -> pd.Series:
     3) Fallback genérico
     """
     s = series.copy()
-
     # 1) Números Excel -> fecha
     num = pd.to_numeric(s, errors="coerce")
     dt = pd.to_datetime(num, unit="D", origin="1899-12-30", errors="coerce")
-
-    # 2) Intentos vectorizados con formatos explícitos
+    # 2) Intentos con formatos explícitos
     s_str = s.astype(str).str.strip()
     fmt_list = ["%m/%d/%Y", "%d/%m/%Y", "%Y-%m-%d", "%m/%d/%y", "%Y/%m/%d"]
     for fmt in fmt_list:
@@ -109,17 +147,15 @@ def parse_effective_to_date(series: pd.Series) -> pd.Series:
         if not mask.any():
             break
         dt.loc[mask] = pd.to_datetime(s_str.loc[mask], format=fmt, errors="coerce")
-
     # 3) Fallback genérico
     mask = dt.isna()
     if mask.any():
         dt.loc[mask] = pd.to_datetime(s_str.loc[mask], errors="coerce")
-
     return dt
 
-# ------------------------------
+# --------------------------------------------------------------------
 # Limpieza principal
-# ------------------------------
+# --------------------------------------------------------------------
 def prepare_df(df_in: pd.DataFrame) -> pd.DataFrame:
     df = df_in.copy()
     df.columns = [c.strip() for c in df.columns]
@@ -148,29 +184,16 @@ def prepare_df(df_in: pd.DataFrame) -> pd.DataFrame:
 
 df = prepare_df(df_raw)
 
-# ==========================================================
-#  Sidebar (SOLO afecta las 3 gráficas)
-# ==========================================================
+# --------------------------------------------------------------------
+# Sidebar (SOLO afecta las 3 gráficas)
+# --------------------------------------------------------------------
 st.sidebar.header("🔍 Filtros (solo gráficas)")
-state_sel = st.sidebar.multiselect(
-    "Estado",
-    options=sorted(df["State"].dropna().unique()) if "State" in df.columns else []
-)
-channel_sel = st.sidebar.multiselect(
-    "Canal de Venta",
-    options=sorted(df["Sales Channel"].dropna().unique()) if "Sales Channel" in df.columns else []
-)
-month_sel = st.sidebar.multiselect(
-    "Mes de Vigencia",
-    options=sorted(df["Effective_Month"].dropna().unique()) if "Effective_Month" in df.columns else []
-)
-vehicle_sel = st.sidebar.multiselect(
-    "Clase de Vehículo",
-    options=sorted(df["Vehicle Class"].dropna().unique()) if "Vehicle Class" in df.columns else []
-)
+state_sel = st.sidebar.multiselect("Estado", sorted(df["State"].dropna().unique()) if "State" in df.columns else [])
+channel_sel = st.sidebar.multiselect("Canal de Venta", sorted(df["Sales Channel"].dropna().unique()) if "Sales Channel" in df.columns else [])
+month_sel = st.sidebar.multiselect("Mes de Vigencia", sorted(df["Effective_Month"].dropna().unique()) if "Effective_Month" in df.columns else [])
+vehicle_sel = st.sidebar.multiselect("Clase de Vehículo", sorted(df["Vehicle Class"].dropna().unique()) if "Vehicle Class" in df.columns else [])
 
 def df_for_charts(base: pd.DataFrame) -> pd.DataFrame:
-    """Aplica filtros SOLO para las gráficas."""
     dfx = base.copy()
     if "State" in dfx.columns and state_sel:
         dfx = dfx[dfx["State"].isin(state_sel)]
@@ -182,29 +205,22 @@ def df_for_charts(base: pd.DataFrame) -> pd.DataFrame:
         dfx = dfx[dfx["Vehicle Class"].isin(vehicle_sel)]
     return dfx
 
-# ------------------------------
-# Guardar conversaciones (apendea en el mismo Excel)
-# ------------------------------
-def save_interaction(user_msg, bot_response):
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    df_new = pd.DataFrame({
-        "timestamp": [timestamp],
-        "usuario": [user_msg],
-        "bot": [bot_response]
-    })
-    if os.path.exists(EXCEL_FILE):
-        try:
-            df_existing = pd.read_excel(EXCEL_FILE)
-            df_final = pd.concat([df_existing, df_new], ignore_index=True)
-        except Exception:
-            df_final = df_new
-    else:
-        df_final = df_new
-    df_final.to_excel(EXCEL_FILE, index=False)
+# --------------------------------------------------------------------
+# Guardar conversaciones en CSV (no toca el Excel)
+# --------------------------------------------------------------------
+LOG_PATH = Path("chat_log.csv")
 
-# ------------------------------
+def save_interaction(user_msg, bot_response):
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    row = pd.DataFrame({"timestamp": [ts], "usuario": [user_msg], "bot": [bot_response]})
+    if LOG_PATH.exists():
+        row.to_csv(LOG_PATH, mode="a", index=False, header=False, encoding="utf-8")
+    else:
+        row.to_csv(LOG_PATH, index=False, encoding="utf-8")
+
+# --------------------------------------------------------------------
 # Métricas auxiliares
-# ------------------------------
+# --------------------------------------------------------------------
 def _top_margin_by(df_in, group_col, top_k=3):
     """Proxy de margen = sum(primas) - sum(reclamos)."""
     if group_col not in df_in.columns:
@@ -226,14 +242,11 @@ def _acceptance_by_offer(df_in):
     acc = tmp.groupby("Renew Offer Type", observed=True)["accepted"].mean().sort_values(ascending=False)
     return acc
 
-# ------------------------------
-# Helper para formatear líneas (coberturas)
-# ------------------------------
 def _format_top_margin_lines(top: pd.DataFrame) -> str:
     if not isinstance(top, pd.DataFrame) or top.empty:
         return "Sin datos suficientes."
     lines = []
-    for idx, row in top.iterrows():  # iterrows devuelve (index, Series)
+    for idx, row in top.iterrows():
         n_val = int(row["n"]) if pd.notna(row["n"]) else 0
         lines.append(
             f"- {idx}: margen {money(row['margen'],'$',0)} "
@@ -241,9 +254,9 @@ def _format_top_margin_lines(top: pd.DataFrame) -> str:
         )
     return "\n".join(lines)
 
-# ------------------------------
+# --------------------------------------------------------------------
 # FAQ dinámico (generadores por intent) - con cifras
-# ------------------------------
+# --------------------------------------------------------------------
 faq_generators = {
     "coberturas": lambda df_in: (
         (lambda top:
@@ -336,75 +349,75 @@ faq_generators = {
     ),
 }
 
-# ------------------------------
+# --------------------------------------------------------------------
 # Training phrases (orientadas a oportunidades)
-# ------------------------------
+# --------------------------------------------------------------------
 training_phrases = {
     "coberturas": [
         "oportunidades por tipo de cobertura",
         "cómo mejorar el mix de coberturas",
         "migrar clientes a premium o extended",
-        "qué cobertura genera mejor margen"
+        "qué cobertura genera mejor margen",
     ],
     "vigencia": [
         "picos de altas por mes",
         "qué meses conviene hacer campañas",
         "oportunidades de retención por vigencia",
-        "cohortes por fecha de inicio"
+        "cohortes por fecha de inicio",
     ],
     "pago_mensual": [
         "clientes con prima alta para ajuste",
         "dónde ofrecer add-ons por prima",
         "asequibilidad de la prima",
-        "mejorar pricing mensual"
+        "mejorar pricing mensual",
     ],
     "clv": [
         "segmentación por CLV",
         "priorizar clientes de alto valor",
         "oportunidades de up-sell por CLV",
-        "cómo mejorar el CLV"
+        "cómo mejorar el CLV",
     ],
     "num_polizas": [
         "oportunidades de cross sell",
         "clientes con una sola póliza",
         "bundling de productos",
-        "aumentar share of wallet"
+        "aumentar share of wallet",
     ],
     "reclamos": [
         "hotspots de siniestros",
         "dónde bajar severidad de reclamos",
         "frecuencia y severidad por estado",
-        "ajustes de deducible y precio"
+        "ajustes de deducible y precio",
     ],
     "quejas": [
         "reducir quejas abiertas",
         "mejorar experiencia por canal",
         "oportunidades para bajar TAT",
-        "priorizar acciones de servicio"
+        "priorizar acciones de servicio",
     ],
     "canales": [
         "qué canal vende mejor con buen margen",
         "canales con mejor conversión",
         "dónde invertir en ventas",
-        "desempeño por canal"
+        "desempeño por canal",
     ],
     "vehiculo": [
         "pricing por clase de vehículo",
         "segmentos de mayor riesgo",
         "oportunidades por tamaño del vehículo",
-        "ajustar tarifas por vehículo"
+        "ajustar tarifas por vehículo",
     ],
     "renovacion": [
         "mejor oferta de renovación",
         "tasa de aceptación por oferta",
         "A/B test de renovación",
-        "cómo subir la renovación"
-    ]
+        "cómo subir la renovación",
+    ],
 }
 
-# ------------------------------
+# --------------------------------------------------------------------
 # Entrenamiento NLP (TF-IDF + KNN)
-# ------------------------------
+# --------------------------------------------------------------------
 X, y = [], []
 for intent, phrases in training_phrases.items():
     for phrase in phrases:
@@ -422,9 +435,9 @@ def predict_intent(user_input: str):
     confidence = 1 - dist[0][0]
     return intent if confidence >= 0.5 else None
 
-# ==========================================================
-# DASHBOARD: 3 GRÁFICAS (interactivas con filtros)
-# ==========================================================
+# --------------------------------------------------------------------
+# Dashboard: 3 gráficas (interactivas con filtros)
+# --------------------------------------------------------------------
 def draw_dashboard(df_filtered: pd.DataFrame):
     st.header("📊 Panel (3 gráficas) — Segmentado por filtros")
 
@@ -446,7 +459,7 @@ def draw_dashboard(df_filtered: pd.DataFrame):
         st.info("No se encontraron columnas 'Monthly Premium Auto' y/o 'Coverage'.")
 
     # 2) Total de reclamos por estado (Top 10)
-    st.subheader("2) Total de reclamos por estado (Top 5)")
+    st.subheader("2) Total de reclamos por estado (Top 10)")
     if "Total Claim Amount" in df_filtered.columns and "State" in df_filtered.columns:
         g2 = (
             df_filtered.dropna(subset=["Total Claim Amount"])
@@ -458,23 +471,47 @@ def draw_dashboard(df_filtered: pd.DataFrame):
     else:
         st.info("No se encontraron columnas 'Total Claim Amount' y/o 'State'.")
 
-    # 3) Tasa de aceptación por tipo de oferta de renovación
-    st.subheader("3) Tasa de aceptación por tipo de oferta de renovación")
+    # 3) Tasa de aceptación por tipo de oferta (torta)
+    st.subheader("3) Aceptaciones por tipo de oferta de renovación (torta)")
     if "Response" in df_filtered.columns and "Renew Offer Type" in df_filtered.columns:
         temp = df_filtered.copy()
         temp["accepted"] = np.where(temp["Response"].astype(str).str.strip().str.lower() == "yes", 1, 0)
-        g3 = (
+
+        rate_by_offer = (
             temp.groupby("Renew Offer Type", observed=True)["accepted"]
-            .mean().sort_values(ascending=False)
-            .rename("Tasa aceptación").to_frame()
+            .mean().sort_index()
         )
-        st.bar_chart(g3)
+        acc_count_by_offer = (
+            temp.groupby("Renew Offer Type", observed=True)["accepted"]
+            .sum().sort_index()
+        )
+
+        sizes = acc_count_by_offer.values.astype(float)
+        labels_base = acc_count_by_offer.index.astype(str).tolist()
+
+        fig, ax = plt.subplots()
+        if sizes.sum() == 0:
+            # Sin aceptaciones: usar tasas normalizadas
+            sizes = rate_by_offer.values.astype(float)
+            if sizes.sum() == 0:
+                st.info("No hay datos suficientes para graficar aceptación por oferta.")
+            else:
+                sizes = sizes / sizes.sum()
+                labels = [f"{lbl} (tasa {pct(rate_by_offer.loc[lbl], 1)})" for lbl in labels_base]
+                ax.pie(sizes, labels=labels, autopct="%1.1f%%", startangle=90)
+                ax.axis("equal")
+                st.pyplot(fig)
+        else:
+            labels = [f"{lbl} (tasa {pct(rate_by_offer.loc[lbl], 1)})" for lbl in labels_base]
+            ax.pie(sizes, labels=labels, autopct="%1.1f%%", startangle=90)
+            ax.axis("equal")
+            st.pyplot(fig)
     else:
         st.info("No se encontraron columnas 'Response' y/o 'Renew Offer Type'.")
 
-# ------------------------------
-# Interfaz Streamlit
-# ------------------------------
+# --------------------------------------------------------------------
+# Interfaz principal
+# --------------------------------------------------------------------
 st.title("🚗 ChatBot Caso de Estudio (Seguros)")
 st.write("Los **filtros de la izquierda** modifican **solo las 3 gráficas**. Las respuestas de texto usan toda la base.")
 
@@ -493,7 +530,6 @@ if user_input:
     else:
         response = "❓ No entendí tu consulta, por favor intenta con otra formulación."
 
-    # Guardar y mostrar
     save_interaction(user_input, response)
     st.session_state["history"].append((user_input, response))
 
@@ -503,9 +539,10 @@ for user_msg, bot_msg in st.session_state["history"]:
     st.markdown(f"🤖 **Bot:** {bot_msg}")
     st.divider()
 
-# Mostrar las 3 gráficas con filtros aplicados
+# Gráficas con filtros
 df_charts = df_for_charts(df)
 draw_dashboard(df_charts)
+
 
 
 # ----------------------- 
