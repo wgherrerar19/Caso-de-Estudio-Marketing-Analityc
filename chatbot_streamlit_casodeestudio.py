@@ -18,20 +18,47 @@ import streamlit as st
 import matplotlib.pyplot as plt
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.neighbors import NearestNeighbors
-
+import io, requests
 
 
 # ------------------------------
-# Configuración / Carga de archivo
+# Configuración / Carga de archivo (vía RAW GitHub o uploader)
 # ------------------------------
-EXCEL_URL = r"https://github.com/wgherrerar19/Caso-de-Estudio-Marketing-Analityc/blob/main/casodeestudio.xlsx"
 
-if os.path.exists(EXCEL_URL):
-    df_raw = pd.read_excel(EXCEL_URL)
-    st.success("✅ Base cargada correctamente")
-    st.dataframe(df_raw.astype(str), use_container_width=True)  # evitar fricciones de tipos
+# URL RAW del archivo en GitHub (no la página HTML)
+EXCEL_URL = "https://raw.githubusercontent.com/wgherrerar19/Caso-de-Estudio-Marketing-Analityc/main/casodeestudio.xlsx"
+
+@st.cache_data(show_spinner=False)
+def load_excel_from_url(url: str) -> pd.DataFrame:
+    r = requests.get(url, timeout=30)
+    r.raise_for_status()
+    return pd.read_excel(io.BytesIO(r.content))  # requiere openpyxl en requirements
+
+df_raw = None
+
+# 1) Intentar por URL RAW
+try:
+    df_raw = load_excel_from_url(EXCEL_URL)
+    origen = "URL RAW de GitHub"
+except Exception as e:
+    st.warning(f"No se pudo leer desde la URL RAW: {e}")
+
+# 2) Fallback: uploader manual si falla la URL
+if df_raw is None:
+    up = st.file_uploader("📥 Sube 'casodeestudio.xlsx'", type=["xlsx", "xls"])
+    if up is not None:
+        try:
+            df_raw = pd.read_excel(up)
+            origen = "archivo subido por el usuario"
+        except Exception as e:
+            st.error(f"No pude leer el archivo subido: {e}")
+
+# 3) Validación final
+if df_raw is not None:
+    st.success(f"✅ Base cargada correctamente desde {origen}")
+    st.dataframe(df_raw.astype(str), use_container_width=True)
 else:
-    st.error("⚠️ No se encontró el archivo casodeestudio.xlsx")
+    st.error("⚠️ No se pudo cargar 'casodeestudio.xlsx'. Verifica la URL RAW o sube el archivo.")
     st.stop()
 
 # ------------------------------
