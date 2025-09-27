@@ -26,7 +26,7 @@ import io, requests
 # ------------------------------
 
 # URL RAW del archivo en GitHub (no la página HTML)
-EXCEL_URL = "https://raw.githubusercontent.com/wgherrerar19/Caso-de-Estudio-Marketing-Analityc/main/casodeestudio.xlsx"
+EXCEL_URL = "https://github.com/wgherrerar19/Caso-de-Estudio-Marketing-Analityc/blob/main/casodeestudio.xlsx"
 
 @st.cache_data(show_spinner=False)
 def load_excel_from_url(url: str) -> pd.DataFrame:
