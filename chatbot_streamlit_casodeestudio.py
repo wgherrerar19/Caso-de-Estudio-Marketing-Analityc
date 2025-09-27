@@ -19,13 +19,15 @@ import matplotlib.pyplot as plt
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.neighbors import NearestNeighbors
 
+
+
 # ------------------------------
 # Configuración / Carga de archivo
 # ------------------------------
-EXCEL_FILE = r"C:\Users\Sala_\Downloads\casodeestudio.xlsx"
+EXCEL_URL = r"https://github.com/wgherrerar19/Caso-de-Estudio-Marketing-Analityc/blob/main/casodeestudio.xlsx"
 
-if os.path.exists(EXCEL_FILE):
-    df_raw = pd.read_excel(EXCEL_FILE)
+if os.path.exists(EXCEL_URL):
+    df_raw = pd.read_excel(EXCEL_URL)
     st.success("✅ Base cargada correctamente")
     st.dataframe(df_raw.astype(str), use_container_width=True)  # evitar fricciones de tipos
 else:
