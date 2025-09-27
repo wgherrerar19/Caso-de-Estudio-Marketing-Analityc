@@ -1,10 +1,5 @@
-os
-datetime
 numpy
 pandas
 streamlit
-matplotlib.pyplot
-sklearn.feature_extraction.text 
-TfidfVectorizer
-sklearn.neighbors 
-NearestNeighbors
+matplotlib
+scikit-learn
