@@ -2,12 +2,14 @@
 """
 ChatBot Caso de Estudio (Seguros) - Streamlit
 
-✔ Carga Excel desde URL RAW de GitHub o uploader
-✔ Selección automática de engine: openpyxl / pandas-calamine / xlrd
-✔ Limpieza y parseo robusto de fechas
+✔ Loader robusto:
+   - XLSX por URL RAW (engine auto: openpyxl / pandas-calamine / xlrd)
+   - Fallback a CSV por URL RAW
+   - Último recurso: file_uploader
+✔ Limpieza y parseo de fechas
 ✔ FAQ dinámico con cifras (texto usa la base completa)
 ✔ Filtros en sidebar que SOLO afectan 3 gráficas interactivas
-✔ Gráfica #3 como torta (aceptación por tipo de oferta)
+✔ Gráfica #3: torta (aceptaciones por tipo de oferta)
 ✔ Log de conversación en CSV (no toca el Excel)
 """
 
@@ -34,72 +36,94 @@ st.set_page_config(
 )
 
 # --------------------------------------------------------------------
-# Utils: motores de Excel y carga desde URL
+# URLs RAW de tu repo (ajústalas si mueves los archivos)
 # --------------------------------------------------------------------
-RAW_URL = "https://raw.githubusercontent.com/wgherrerar19/Caso-de-Estudio-Marketing-Analityc/main/casodeestudio.xlsx"
+RAW_XLSX = "https://raw.githubusercontent.com/wgherrerar19/Caso-de-Estudio-Marketing-Analityc/main/casodeestudio.xlsx"
+RAW_CSV  = "https://raw.githubusercontent.com/wgherrerar19/Caso-de-Estudio-Marketing-Analityc/main/casodeestudio.csv"  # opcional (si subes un CSV)
 
-def _has_module(mod: str) -> bool:
+# --------------------------------------------------------------------
+# Utils: detección de motores y carga desde URL
+# --------------------------------------------------------------------
+def _has(mod: str) -> bool:
     return importlib.util.find_spec(mod) is not None
 
-def pick_excel_engine(ext: str = ".xlsx") -> str | None:
-    """Devuelve el motor disponible para leer Excel."""
+def pick_engine_for(ext: str) -> str | None:
+    """Devuelve un motor disponible para Excel según extensión."""
     ext = (ext or "").lower()
-    # Prioridad para .xlsx
-    if ext.endswith(".xlsx") and _has_module("openpyxl"):
+    # Preferimos openpyxl para .xlsx
+    if ext.endswith(".xlsx") and _has("openpyxl"):
         return "openpyxl"
-    # Alternativa ligera y rápida (xlsx/xls)
-    if _has_module("pandas_calamine"):
+    # Alternativa rápida para .xlsx/.xls
+    if _has("pandas_calamine"):
         return "calamine"
     # Antiguo .xls
-    if ext.endswith(".xls") and _has_module("xlrd"):
+    if ext.endswith(".xls") and _has("xlrd"):
         return "xlrd"
     return None
 
 @st.cache_data(show_spinner=False)
-def load_excel_from_url(url: str, ext: str = ".xlsx") -> pd.DataFrame:
-    eng = pick_excel_engine(ext)
+def read_xlsx_from_url(url: str) -> pd.DataFrame:
+    eng = pick_engine_for(".xlsx")
     if not eng:
-        raise RuntimeError(
-            "No hay motor de Excel instalado. Añade 'openpyxl' (xlsx) "
-            "o 'pandas-calamine' a requirements.txt."
-        )
+        raise RuntimeError("No hay motor Excel instalado (openpyxl o pandas-calamine).")
     r = requests.get(url, timeout=30)
     r.raise_for_status()
     return pd.read_excel(io.BytesIO(r.content), engine=eng)
 
+@st.cache_data(show_spinner=False)
+def read_csv_from_url(url: str) -> pd.DataFrame:
+    r = requests.get(url, timeout=30)
+    r.raise_for_status()
+    # pd.read_csv puede leer directamente bytes
+    return pd.read_csv(io.BytesIO(r.content))
+
 # --------------------------------------------------------------------
-# Carga de datos (URL RAW → uploader)
+# Carga de datos: XLSX RAW → CSV RAW → uploader
 # --------------------------------------------------------------------
 df_raw, origen = None, ""
 
+# 1) Intentar XLSX por URL RAW
 try:
-    df_raw = load_excel_from_url(RAW_URL, ".xlsx")
-    origen = "URL RAW de GitHub"
-    st.caption(f"Motor Excel usado: **{pick_excel_engine('.xlsx')}**")
+    df_raw = read_xlsx_from_url(RAW_XLSX)
+    origen = "XLSX (URL RAW)"
+    st.caption(f"Motor Excel usado: **{pick_engine_for('.xlsx') or 'N/A'}**")
 except Exception as e:
-    st.warning(f"No se pudo leer desde la URL RAW: {e}")
+    st.warning(f"No se pudo leer XLSX desde la URL RAW: {e}")
 
+# 2) Fallback: CSV por URL RAW (si existe en el repo)
 if df_raw is None:
-    up = st.file_uploader("📥 Sube 'casodeestudio.xlsx' (*.xlsx, *.xls)", type=["xlsx", "xls"])
+    try:
+        df_raw = read_csv_from_url(RAW_CSV)
+        origen = "CSV (URL RAW)"
+    except Exception:
+        pass
+
+# 3) Último recurso: uploader
+if df_raw is None:
+    up = st.file_uploader("📥 Sube 'casodeestudio.xlsx' o 'casodeestudio.csv'", type=["xlsx", "xls", "csv"])
     if up is not None:
         try:
             ext = Path(up.name).suffix.lower()
-            eng = pick_excel_engine(ext)
-            if not eng:
-                st.error("Instala 'openpyxl' (xlsx) o 'pandas-calamine' (xlsx/xls) o 'xlrd' (xls).")
+            if ext == ".csv":
+                df_raw = pd.read_csv(up)
+                origen = "CSV subido por usuario"
             else:
+                eng = pick_engine_for(ext)
+                if not eng:
+                    raise RuntimeError("Falta motor Excel (openpyxl o pandas-calamine).")
                 df_raw = pd.read_excel(up, engine=eng)
-                origen = "archivo subido por el usuario"
+                origen = "Excel subido por usuario"
                 st.caption(f"Motor Excel usado: **{eng}**")
         except Exception as e:
             st.error(f"No pude leer el archivo subido: {e}")
 
-if df_raw is not None:
-    st.success(f"✅ Base cargada correctamente desde {origen}")
-    st.dataframe(df_raw.astype(str), use_container_width=True)
-else:
-    st.error("⚠️ No se pudo cargar 'casodeestudio.xlsx'. Verifica la URL RAW o sube el archivo.")
+# 4) Validación final
+if df_raw is None:
+    st.error("⚠️ No se pudo cargar la base. Asegura la URL RAW o sube el archivo.")
     st.stop()
+else:
+    st.success(f"✅ Base cargada desde {origen}")
+    st.dataframe(df_raw.astype(str), use_container_width=True)
 
 # --------------------------------------------------------------------
 # Helpers de formato y parsing
@@ -131,7 +155,7 @@ def coalesce_pandas(x, fallback):
 def parse_effective_to_date(series: pd.Series) -> pd.Series:
     """
     Parser robusto para fechas con formatos mixtos:
-    1) Números de Excel (origen 1899-12-30)
+    1) Números Excel (origen 1899-12-30)
     2) Formatos explícitos comunes
     3) Fallback genérico
     """
@@ -471,7 +495,7 @@ def draw_dashboard(df_filtered: pd.DataFrame):
     else:
         st.info("No se encontraron columnas 'Total Claim Amount' y/o 'State'.")
 
-    # 3) Tasa de aceptación por tipo de oferta (torta)
+    # 3) Aceptaciones por tipo de oferta (torta)
     st.subheader("3) Aceptaciones por tipo de oferta de renovación (torta)")
     if "Response" in df_filtered.columns and "Renew Offer Type" in df_filtered.columns:
         temp = df_filtered.copy()
@@ -542,7 +566,6 @@ for user_msg, bot_msg in st.session_state["history"]:
 # Gráficas con filtros
 df_charts = df_for_charts(df)
 draw_dashboard(df_charts)
-
 
 
 # ----------------------- 
